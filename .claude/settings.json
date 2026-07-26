@@ -98,7 +98,7 @@
     ],
     "defaultMode": "auto"
   },
-  "model": "fable",
+  "model": "opus",
   "hooks": {
     "SessionStart": [
       {
@@ -147,7 +147,7 @@
       }
     }
   },
-  "effortLevel": "high",
+  "effortLevel": "medium",
   "autoUpdatesChannel": "latest",
   "tui": "fullscreen",
   "switchModelsOnFlag": false,
