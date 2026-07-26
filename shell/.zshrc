@@ -36,10 +36,11 @@ alias fs="foreman start -f Procfile.dev"
 alias python='python3'
 alias pip='python -m pip'
 
-# Modern CLI tool aliases
-alias cat='bat'
-alias grep='rg'
-alias find='fd'
+# Modern CLI tool aliases (only alias when the replacement is actually installed,
+# so a missing tool doesn't break the base command)
+command -v bat >/dev/null && alias cat='bat'
+command -v rg  >/dev/null && alias grep='rg'
+command -v fd  >/dev/null && alias find='fd'
 
 # NVM
 [ -s "$(brew --prefix)/opt/nvm/nvm.sh" ] && \. "$(brew --prefix)/opt/nvm/nvm.sh"
@@ -56,10 +57,7 @@ fpath=($HOME/.docker/completions $fpath)
 autoload -Uz compinit
 compinit
 
-# asdf version manager
-. $(brew --prefix asdf)/libexec/asdf.sh
-
-# Prefer Homebrew globals over stale asdf shims when both expose a command.
+# asdf version manager (v0.16+ is a Go binary on PATH, no shell sourcing needed)
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 
 # Load local configuration (API keys, secrets, machine-specific settings)
@@ -68,3 +66,11 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 # Pi worktree support
 PI_WORKTREE_SH="$HOME/.pi/agent/git/github.com/carterdea/pi-worktrees/shell/pi.zsh"
 [ -f "$PI_WORKTREE_SH" ] && source "$PI_WORKTREE_SH"
+
+# pnpm
+export PNPM_HOME="$HOME/Library/pnpm"
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+# pnpm end
