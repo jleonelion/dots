@@ -32,6 +32,7 @@ brew "libtool"
 brew "pkgconf"
 
 # Languages & runtimes
+brew "asdf"
 brew "node"
 brew "nvm"
 brew "python@3.13"
