@@ -10,6 +10,7 @@ NC='\033[0m' # No Color
 
 # Dotfiles directory
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GLOBAL_AGENTS_MD="${GLOBAL_AGENTS_MD:-$HOME/code/home/global/AGENTS.md}"
 BACKUP_DIR="$HOME/.dotfiles-backup-$(date +%Y%m%d-%H%M%S)"
 
 # Flags
@@ -208,7 +209,7 @@ install_claude() {
     info "Installing Claude Code configuration..."
 
     # Install global AGENTS.md as CLAUDE.md
-    create_symlink "$DOTFILES_DIR/agents/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+    create_symlink "$GLOBAL_AGENTS_MD" "$HOME/.claude/CLAUDE.md"
 
     # Install settings.json
     create_symlink "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
@@ -268,7 +269,7 @@ install_codex() {
     info "Installing Codex (OpenAI) configuration..."
 
     # Install global AGENTS.md
-    create_symlink "$DOTFILES_DIR/agents/AGENTS.md" "$HOME/.codex/AGENTS.md"
+    create_symlink "$GLOBAL_AGENTS_MD" "$HOME/.codex/AGENTS.md"
 
     # Create config.toml from example if it doesn't exist
     if [[ ! -f "$HOME/.codex/config.toml" ]]; then
@@ -366,7 +367,7 @@ install_opencode() {
     info "Installing OpenCode configuration..."
 
     # Install global instructions file
-    create_symlink "$DOTFILES_DIR/agents/AGENTS.md" "$HOME/.config/opencode/AGENTS.md"
+    create_symlink "$GLOBAL_AGENTS_MD" "$HOME/.config/opencode/AGENTS.md"
 
     # Create config from example if it doesn't exist
     if [[ ! -f "$HOME/.config/opencode/opencode.json" ]]; then
@@ -415,7 +416,7 @@ install_pi() {
     info "Installing pi coding agent configuration..."
 
     # Install global AGENTS.md
-    create_symlink "$DOTFILES_DIR/agents/AGENTS.md" "$HOME/.pi/agent/AGENTS.md"
+    create_symlink "$GLOBAL_AGENTS_MD" "$HOME/.pi/agent/AGENTS.md"
 
     # Install skills (skip skills meant for other agents)
     local PI_SKIP_SKILLS=("codex-computer-use")

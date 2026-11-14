@@ -31,10 +31,6 @@ setup() {
     [ -f "$DOTFILES_DIR/.codex/config.toml.example" ]
 }
 
-@test "agents/AGENTS.md exists" {
-    [ -f "$DOTFILES_DIR/agents/AGENTS.md" ]
-}
-
 @test "agents/skills directory exists" {
     [ -d "$DOTFILES_DIR/agents/skills" ]
 }

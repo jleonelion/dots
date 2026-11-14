@@ -6,7 +6,7 @@ Shared skills and subagents installable to Claude Code, Codex, OpenCode, Cursor,
 
 ```
 agents/
-├── AGENTS.md                # Global instructions (symlinked into each harness)
+├── (global AGENTS.md lives in ~/code/home/global/AGENTS.md)
 ├── subagents/               # Subagent definitions
 │   ├── pr-description-gen.md
 │   ├── security-scanner.md
@@ -113,7 +113,7 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 
 ### What `--claude` installs
 
-- `~/.claude/CLAUDE.md` (symlink to `agents/AGENTS.md`)
+- `~/.claude/CLAUDE.md` (symlink to `~/code/home/global/AGENTS.md`)
 - `~/.claude/agents/*.md` (symlinks to `agents/subagents/*.md`)
 - `~/.claude/skills/*` (symlinks to `agents/skills/*`)
 

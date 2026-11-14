@@ -11,7 +11,7 @@ Personal dotfiles and shared agent skills for macOS.
 - `config/` — ripgrep, gh, ghostty
 - `ssh/` — SSH config
 - `agents/` — shared agent instructions and skills
-  - `AGENTS.md` — installed to Claude, OpenCode, pi, and other agent configs via symlink
+  - global AGENTS.md now lives in `~/code/home/global/AGENTS.md`; install.sh symlinks it into Claude, Codex, OpenCode, and pi
   - `skills/` — shared user-invocable skills (Agent Skills standard: `SKILL.md` + frontmatter), compatible with Claude Code, Codex CLI, OpenCode, Cursor, and pi
   - `subagents/` — subagent definitions
 - `.opencode/` — OpenCode config examples
