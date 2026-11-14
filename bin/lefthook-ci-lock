@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# LEFTHOOK_BIN shim: routes lefthook hook runs through ci-lock so checks are
+# serialized machine-wide with no per-repo config. Slow and fast checks queue
+# in separate lanes: pre-push (tests, builds) takes the heavy lock, pre-commit
+# (staged lint/format) takes the fast lock, so a commit only ever waits behind
+# other commits — never behind a running test suite. Every other lefthook
+# invocation passes through unlocked.
+# Exported from shell/.zshenv and shell/.bashrc; lefthook's generated
+# .git/hooks scripts honor LEFTHOOK_BIN before any other resolution.
+set -euo pipefail
+
+LEFTHOOK_CMD=()
+
+# LEFTHOOK_BIN short-circuits lefthook's own resolution chain, so this has to
+# cover the same ground: project-local installs first, then the project's
+# package manager, then a global binary.
+resolve_lefthook() {
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+  if [[ -n "$root" ]]; then
+    if [[ -x "$root/node_modules/.bin/lefthook" ]]; then
+      LEFTHOOK_CMD=("$root/node_modules/.bin/lefthook")
+      return
+    fi
+    # Yarn PnP has no node_modules to look in. Only claim it if yarn can
+    # actually resolve lefthook, since a PnP repo may rely on a global one.
+    if [[ -f "$root/.pnp.cjs" || -f "$root/.pnp.loader.mjs" ]] &&
+      yarn bin lefthook >/dev/null 2>&1; then
+      LEFTHOOK_CMD=(yarn lefthook)
+      return
+    fi
+    if [[ -x "$root/.venv/bin/lefthook" ]]; then
+      LEFTHOOK_CMD=("$root/.venv/bin/lefthook")
+      return
+    fi
+    # An actual gem declaration, not any mention: a Gemfile commenting that
+    # lefthook is installed globally would otherwise send the repo to bundler.
+    if [[ -f "$root/Gemfile" ]] &&
+      grep -qE '^[[:space:]]*gem[[:space:]]+["'\'']lefthook["'\'']' "$root/Gemfile"; then
+      LEFTHOOK_CMD=(bundle exec lefthook)
+      return
+    fi
+    # Python tools live in a project environment rather than on PATH, and the
+    # runners are not interchangeable: `uv run` builds its own environment and
+    # would miss a Poetry install entirely. Pick by lockfile.
+    if [[ -f "$root/pyproject.toml" ]] &&
+      grep -v '^[[:space:]]*#' "$root/pyproject.toml" | grep -q lefthook; then
+      if [[ -f "$root/poetry.lock" ]]; then
+        LEFTHOOK_CMD=(poetry run lefthook)
+        return
+      fi
+      if [[ -f "$root/uv.lock" ]]; then
+        LEFTHOOK_CMD=(uv run lefthook)
+        return
+      fi
+    fi
+  fi
+
+  if command -v lefthook >/dev/null 2>&1; then
+    LEFTHOOK_CMD=(lefthook)
+    return
+  fi
+  if command -v mise >/dev/null 2>&1 && mise which lefthook >/dev/null 2>&1; then
+    LEFTHOOK_CMD=(mise exec -- lefthook)
+    return
+  fi
+
+  echo "lefthook-ci-lock: no lefthook binary found" >&2
+  exit 1
+}
+
+# ci-lock is symlinked alongside this script; fall back to PATH.
+find_ci_lock() {
+  local here
+  here="$(dirname "$0")"
+  if [[ -x "$here/ci-lock" ]]; then
+    echo "$here/ci-lock"
+  else
+    command -v ci-lock || true
+  fi
+}
+
+resolve_lefthook
+
+lane=""
+if [[ "${1:-}" == "run" ]]; then
+  case "${2:-}" in
+    pre-push) lane=heavy ;;
+    pre-commit) lane=fast ;;
+  esac
+fi
+
+clean_tree() {
+  [[ -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" ]] && git rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null
+}
+
+full_run() {
+  local arg
+  [[ -z "${LEFTHOOK_EXCLUDE:-}${LEFTHOOK_CONFIG:-}" && "${LEFTHOOK:-}" != 0 && "${LEFTHOOK:-}" != false ]] || return 1
+  for arg in "${@:3}"; do
+    [[ "$arg" != -* ]] || return 1
+  done
+}
+
+hook_config() {
+  local root config name
+  root="$(git rev-parse --show-toplevel)"
+  config="$(cat "$root"/{.,}lefthook*.{yml,yaml,json,toml} "$root"/.config/lefthook*.{yml,yaml,json,toml} 2>/dev/null)"
+  printf '%s\n' "$config"
+  for name in $(grep -oE '[$][{]?[A-Za-z_][A-Za-z0-9_]*' <<<"$config" | tr -d '{$' | sort -u); do
+    printf '%s=%s\n' "$name" "${!name:-}"
+  done
+}
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/ci-lock"
+pass_file=""
+if [[ "$lane" == heavy ]] && full_run "$@" && tree="$(clean_tree)"; then
+  config_key="$(hook_config | git hash-object --stdin)"
+  pass_file="$state_dir/passed/pre-push-$tree-${config_key:0:12}"
+  if [[ "${CI_LOCK_NO_PASS_CACHE:-}" != 1 && -n "$(find "$pass_file" -mtime -14 2>/dev/null)" ]]; then
+    echo "lefthook-ci-lock: pre-push already passed for tree ${tree:0:12}; skipping (CI_LOCK_NO_PASS_CACHE=1 reruns)" >&2
+    printf '%s\theavy\t0\t0\tcached\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$PWD lefthook run pre-push" \
+      >>"${CI_LOCK_LOG:-$state_dir/ci-lock.log}" 2>/dev/null || true
+    exit 0
+  fi
+fi
+
+if [[ -n "$lane" ]]; then
+  lock="$(find_ci_lock)"
+  if [[ -n "$lock" ]]; then
+    [[ -n "$pass_file" ]] || exec env CI_LOCK_LANE="$lane" "$lock" "${LEFTHOOK_CMD[@]}" "$@"
+    env CI_LOCK_LANE="$lane" "$lock" "${LEFTHOOK_CMD[@]}" "$@" <&0 &
+    child=$!
+    trap 'kill -TERM "$child" 2>/dev/null' HUP INT TERM
+    status=0
+    until wait "$child"; do
+      status=$?
+      kill -0 "$child" 2>/dev/null || break
+    done
+    if ((status != 0)); then
+      rm -f "$pass_file"
+    elif [[ "$(clean_tree)" == "$tree" ]]; then
+      mkdir -p "${pass_file%/*}"
+      touch "$pass_file"
+      find "${pass_file%/*}" -type f -mtime +14 -delete 2>/dev/null || true
+    fi
+    exit "$status"
+  fi
+  echo "lefthook-ci-lock: ci-lock not found; running unqueued" >&2
+fi
+
+exec "${LEFTHOOK_CMD[@]}" "$@"

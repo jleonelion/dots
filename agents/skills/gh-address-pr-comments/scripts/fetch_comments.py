@@ -5,9 +5,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from typing import Any
+
+CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
+# Row of the Codex summary table: | **Review** | ✅ **Status** <relative-time datetime="..."> | `sha` | trigger |
+CODEX_SUMMARY_ROW = re.compile(
+    r"^\|\s*[^|]*?\*\*(?P<review>[^*|]+)\*\*[^|]*\|"
+    r"[^|]*?\*\*(?P<status>[^*|]+)\*\*(?:[^|]*?datetime=\"(?P<at>[^\"]+)\")?[^|]*\|"
+    r"\s*`(?P<commit>[0-9a-f]{7,40})`",
+    re.MULTILINE,
+)
 
 META_QUERY = """\
 query($owner: String!, $repo: String!, $number: Int!) {
@@ -34,6 +44,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           body
           createdAt
           updatedAt
+          authorAssociation
           author { __typename login }
         }
       }
@@ -53,6 +64,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           state
           body
           submittedAt
+          authorAssociation
           commit { oid }
           author { __typename login }
         }
@@ -79,17 +91,8 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           startDiffSide
           originalLine
           originalStartLine
-          resolvedBy { __typename login }
-          comments(first: 100) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              id
-              body
-              createdAt
-              updatedAt
-              author { __typename login }
-            }
-          }
+          viewerCanReply
+          viewerCanResolve
         }
       }
     }
@@ -101,13 +104,17 @@ THREAD_COMMENTS_QUERY = """\
 query($threadId: ID!, $cursor: String) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
+      isResolved
       comments(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
+          databaseId
+          pullRequestReview { state }
           body
           createdAt
           updatedAt
+          authorAssociation
           author { __typename login }
         }
       }
@@ -118,7 +125,7 @@ query($threadId: ID!, $cursor: String) {
 
 
 def run(cmd: list[str], stdin: str | None = None) -> str:
-    result = subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+    result = subprocess.run(cmd, input=stdin, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
     return result.stdout
@@ -143,7 +150,7 @@ def run_json_value(cmd: list[str], stdin: str | None = None) -> Any:
 def run_json_list(cmd: list[str], stdin: str | None = None) -> list[dict[str, Any]]:
     data = run_json_value(cmd, stdin=stdin)
     if not isinstance(data, list):
-        raise RuntimeError(f"Expected JSON list from command: {' '.join(cmd)}")
+        raise TypeError(f"Expected JSON list from command: {' '.join(cmd)}")
     if all(isinstance(page, list) for page in data):
         return [item for page in data for item in page]
     return data
@@ -233,22 +240,29 @@ def fetch_connection(owner: str, repo: str, number: int, query: str, key: str) -
 
 
 def fetch_all_thread_comments(thread: dict[str, Any]) -> None:
-    comments = thread.get("comments") or {}
-    page_info = comments.get("pageInfo") or {}
-    if not page_info.get("hasNextPage"):
-        return
-
-    nodes = list(comments.get("nodes") or [])
-    cursor = page_info.get("endCursor")
-    while cursor:
+    nodes: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
         payload = gh_thread_comments(thread["id"], cursor)
         if payload.get("errors"):
-            raise RuntimeError(json.dumps(payload["errors"], indent=2))
-        connection = payload["data"]["node"]["comments"]
-        nodes.extend(connection.get("nodes") or [])
+            raise RuntimeError(json.dumps(payload["errors"]))
+        current = payload["data"]["node"]
+        if current is None:
+            raise RuntimeError(f"Thread unavailable: {thread['id']}")
+        if current["isResolved"]:
+            thread["isResolved"] = True
+            thread["comments"] = {"nodes": []}
+            return
+        connection = current["comments"]
+        nodes.extend(
+            comment for comment in connection.get("nodes") or []
+            if (comment.get("pullRequestReview") or {}).get("state") != "PENDING"
+        )
         page_info = connection["pageInfo"]
-        cursor = page_info["endCursor"] if page_info["hasNextPage"] else None
-    thread["comments"] = {"nodes": nodes}
+        if not page_info["hasNextPage"]:
+            thread["comments"] = {"nodes": nodes}
+            return
+        cursor = page_info["endCursor"]
 
 
 def fetch_pr_reactions(owner: str, repo: str, number: int) -> list[dict[str, Any]]:
@@ -265,6 +279,83 @@ def fetch_pr_reactions(owner: str, repo: str, number: int) -> list[dict[str, Any
     )
 
 
+def is_bot_user(user: dict[str, Any]) -> bool:
+    """REST reports some app bots (e.g. the Codex connector) as type "User"; the [bot] login suffix is authoritative."""
+    login = (user.get("login") or "").lower()
+    return (user.get("type") or "").lower() in {"bot", "app"} or login.endswith("[bot]")
+
+
+def is_codex_summary_comment(comment: dict[str, Any]) -> bool:
+    author = comment.get("author") or {}
+    return (
+        (author.get("__typename") or "").lower() == "bot"
+        and (author.get("login") or "").lower() == "chatgpt-codex-connector"
+        and CODEX_SUMMARY_MARKER in (comment.get("body") or "")
+    )
+
+
+def parse_codex_summary(body: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "review": match["review"].strip(),
+            "status": match["status"].strip(),
+            "completedAt": match["at"] if match["status"].strip() == "Completed" else None,
+            "commit": match["commit"],
+        }
+        for match in CODEX_SUMMARY_ROW.finditer(body)
+    ]
+
+
+def summarize_codex_review(
+    reactions: list[dict[str, Any]],
+    conversation_comments: list[dict[str, Any]],
+    head_ref_oid: str | None,
+) -> dict[str, Any]:
+    """Bind Codex's commit-less PR +1 to the commit its summary comment says was last reviewed.
+
+    Codex reacts +1 on the PR once all reviews finish with no findings, and keeps one summary
+    comment updated with each review's status and commit. Sign-off for head needs all three:
+    latest completed review is on head, nothing still running, and the +1 landed after it.
+    """
+    summary = max(
+        (comment for comment in conversation_comments if is_codex_summary_comment(comment)),
+        key=lambda comment: comment.get("updatedAt") or comment.get("createdAt") or "",
+        default=None,
+    )
+    rows = parse_codex_summary(summary["body"]) if summary else []
+    latest_completed = max(
+        (row for row in rows if row["completedAt"]),
+        key=lambda row: row["completedAt"],
+        default=None,
+    )
+    matches_head = bool(
+        latest_completed and head_ref_oid and head_ref_oid.startswith(latest_completed["commit"])
+    )
+    in_progress = any(not row["completedAt"] for row in rows)
+    thumbs_up_at = max(
+        (
+            reaction.get("created_at") or ""
+            for reaction in reactions
+            if reaction.get("content") == "+1"
+            and ((reaction.get("user") or {}).get("login") or "").lower() == "chatgpt-codex-connector[bot]"
+        ),
+        default=None,
+    )
+    # Reactions have second precision; completedAt has microseconds. Both are UTC, so compare to the second.
+    thumbs_up_after_review = bool(
+        thumbs_up_at and latest_completed and thumbs_up_at[:19] >= latest_completed["completedAt"][:19]
+    )
+    return {
+        "summary_comment_id": summary.get("id") if summary else None,
+        "reviews": rows,
+        "latest_completed": latest_completed,
+        "latest_completed_matches_head": matches_head,
+        "in_progress": in_progress,
+        "thumbs_up_at": thumbs_up_at,
+        "head_signoff": matches_head and not in_progress and thumbs_up_after_review,
+    }
+
+
 def is_review_agent(author: dict[str, Any] | None) -> bool:
     if not author:
         return False
@@ -272,13 +363,7 @@ def is_review_agent(author: dict[str, Any] | None) -> bool:
     typename = (author.get("__typename") or "").lower()
     if typename not in {"bot", "app"}:
         return False
-    return (
-        "codex" in login
-        or "openai" in login
-        or "chatgpt" in login
-        or "claude" in login
-        or "anthropic" in login
-    )
+    return login in {"chatgpt-codex-connector", "chatgpt-codex-connector[bot]", "claude", "claude[bot]"}
 
 
 def review_has_actionable_body(review: dict[str, Any]) -> bool:
@@ -310,6 +395,8 @@ def latest_active_feedback_update(
             if updated_at:
                 timestamps.append(updated_at)
     for comment in conversation_comments:
+        if is_codex_summary_comment(comment):
+            continue
         updated_at = comment.get("updatedAt") or comment.get("createdAt")
         if updated_at:
             timestamps.append(updated_at)
@@ -335,8 +422,7 @@ def summarize_approval(
     for reaction in thumbs_up:
         user = reaction.get("user") or {}
         login = (user.get("login") or "").lower()
-        user_type = (user.get("type") or "").lower()
-        if user_type not in {"bot", "app"}:
+        if not is_bot_user(user):
             continue
         if (
             "codex" in login
@@ -351,7 +437,7 @@ def summarize_approval(
         review
         for review in reviews
         if is_review_agent(review.get("author"))
-        and (review.get("state") == "APPROVED" or review_has_actionable_body(review))
+        and review.get("state") != "PENDING"
     ]
     latest_active_feedback_at = latest_active_feedback_update(
         review_threads, conversation_comments, reviews
@@ -360,13 +446,13 @@ def summarize_approval(
         review
         for review in agent_reviews
         if review.get("state") == "APPROVED"
-        and (not head_ref_oid or (review.get("commit") or {}).get("oid") == head_ref_oid)
+        and (bool(head_ref_oid) and (review.get("commit") or {}).get("oid") == head_ref_oid)
         and (not latest_active_feedback_at or (review.get("submittedAt") or "") >= latest_active_feedback_at)
     ]
     latest_agent_review = max(agent_reviews, key=lambda review: review.get("submittedAt") or "", default=None)
     latest_agent_review_commit = (latest_agent_review.get("commit") or {}).get("oid") if latest_agent_review else None
     latest_agent_review_matches_head = bool(
-        latest_agent_review and (not head_ref_oid or latest_agent_review_commit == head_ref_oid)
+        latest_agent_review and (bool(head_ref_oid) and latest_agent_review_commit == head_ref_oid)
     )
     latest_agent_review_approves = bool(
         latest_agent_review
@@ -374,8 +460,11 @@ def summarize_approval(
         and latest_agent_review_matches_head
         and (not latest_active_feedback_at or (latest_agent_review.get("submittedAt") or "") >= latest_active_feedback_at)
     )
+    codex_review = summarize_codex_review(reactions, conversation_comments, head_ref_oid)
     return {
         "has_agent_approval": latest_agent_review_approves,
+        "has_codex_head_signoff": codex_review["head_signoff"],
+        "codex_review": codex_review,
         "has_thumbs_up": bool(codex_like),
         "has_any_thumbs_up": bool(thumbs_up),
         "has_codex_like_thumbs_up": bool(codex_like),
@@ -425,16 +514,24 @@ def fetch_all(owner: str, repo: str, number: int) -> dict[str, Any]:
         "repo": repo,
     }
     conversation_comments = fetch_connection(owner, repo, number, COMMENTS_QUERY, "comments")
-    reviews = fetch_connection(owner, repo, number, REVIEWS_QUERY, "reviews")
+    all_reviews = fetch_connection(owner, repo, number, REVIEWS_QUERY, "reviews")
+    pending_review_count = sum(review.get("state") == "PENDING" for review in all_reviews)
+    reviews = [review for review in all_reviews if review.get("state") != "PENDING"]
     review_threads = fetch_connection(owner, repo, number, THREADS_QUERY, "reviewThreads")
     for thread in review_threads:
-        fetch_all_thread_comments(thread)
+        if not thread["isResolved"]:
+            fetch_all_thread_comments(thread)
+    review_threads = [
+        thread for thread in review_threads
+        if not thread["isResolved"] and thread["comments"]["nodes"]
+    ]
     reactions = fetch_pr_reactions(owner, repo, number)
 
     return {
         "pull_request": pr_meta,
         "conversation_comments": conversation_comments,
         "reviews": reviews,
+        "pending_review_count": pending_review_count,
         "review_threads": review_threads,
         "pr_reactions": reactions,
         "approval": summarize_approval(

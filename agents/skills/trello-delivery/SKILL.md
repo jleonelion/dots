@@ -109,7 +109,7 @@ Run only what the project actually has, preferring quiet/silent variants (often 
 
 - `git diff --check` for whitespace/conflict markers.
 - Typecheck and lint (e.g. `bun run typecheck`, `bun run lint`, biome) when those scripts exist.
-- The relevant tests. If the change touches a unit-tested area, run that suite (`bun run test`, vitest, jest). If there are e2e/playwright tests for the touched flow and they're fast enough to matter, run them; otherwise note they exist.
+- The relevant tests: only the test files covering what you touched (`vitest run <path>`, a name filter), not the whole suite. If there are e2e/playwright tests for the touched flow, run that one spec when it's fast; otherwise note it exists. The pre-push hook runs the full gate.
 - If checks surface failures, separate what your change introduced from pre-existing repo-wide noise, and report both. Don't hide failures, and don't block delivery on tooling the repo simply lacks — say "no test script present" and move on.
 
 ### 6. Cleanup pass (folded into this PR)
@@ -118,7 +118,7 @@ Before opening the PR — and before the preview, screenshots, and everything af
 
 - Run `de-slop`, then `code-simplifier` — **one after the other, never at the same time**. Both edit the same changed files and would collide.
 - **The edits must land on the branch you push.** Cleanup performed anywhere but the working tree you commit from is cleanup that never ships. If you can't guarantee the edits reach that tree, do the passes yourself in it. The cleanup is not negotiable to save context.
-- `de-slop` defaults to a dry-run list that waits for a manual selection. Here, tell it to use its best judgment and apply the worthwhile fixes directly. Keep it scoped to AI artifacts and cleanup noise in the branch diff.
+- `de-slop` applies the fixes it judges worthwhile directly. Keep it scoped to AI artifacts and cleanup noise in the branch diff.
 - `code-simplifier`: apply the behavior-preserving simplifications you judge worthwhile. Keep changes scoped to what you touched; don't refactor the whole repo.
 - Re-run the relevant checks from step 5 after cleanup so the folded-in changes are still green.
 - These cleanups ship in the same PR as the feature, in their own commits.
