@@ -1,0 +1,933 @@
+#!/usr/bin/env bats
+
+# Classifier tests for bin/ci-queue-hook. Each case feeds a PreToolUse
+# payload through the hook in dry-run mode and asserts the verdict it logs.
+
+setup() {
+    DIR="$( cd "$( dirname "$BATS_TEST_FILENAME" )" && pwd )"
+    HOOK="$(dirname "$DIR")/bin/ci-queue-hook"
+    LOG="$BATS_TEST_TMPDIR/queue-hook.log"
+    # The hook resolves ci-lock at $HOME/.local/bin/ci-lock; point HOME at a
+    # tmpdir holding the repo's copy so enforce-mode tests do not depend on
+    # the developer's dotfiles being installed.
+    FAKE_HOME="$BATS_TEST_TMPDIR/home"
+    mkdir -p "$FAKE_HOME/.local/bin"
+    ln -sf "$(dirname "$DIR")/bin/ci-lock" "$FAKE_HOME/.local/bin/ci-lock"
+}
+
+# Prints "ACTION REASON" for a command classified in dry-run mode.
+classify() {
+    : > "$LOG"
+    jq -cn --arg c "$1" '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK"
+    head -1 "$LOG" | awk -F'\t' '{print $2" "$3}'
+}
+
+# Prints the hook's stdout (the rewrite JSON, if any) in enforce mode.
+enforce() {
+    jq -cn --arg c "$1" '{tool_input:{command:$c}}' |
+        HOME="$FAKE_HOME" CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=1 "$HOOK"
+}
+
+# Same as enforce, with a Codex payload (identified by its turn_id).
+enforce_codex() {
+    jq -cn --arg c "$1" '{turn_id:"t1",tool_input:{command:$c}}' |
+        HOME="$FAKE_HOME" CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=1 "$HOOK"
+}
+
+# --- single-file tests must stay out of the queue, kebab-case included ---
+
+@test "single-file test with plain name is file-scoped" {
+    [ "$(classify 'bun test src/utils/simple.test.ts')" = "SKIP file-scoped" ]
+}
+
+@test "single-file test with kebab-case name is file-scoped" {
+    [ "$(classify 'bun run test -- server/routers/migration-batch.test.ts')" = "SKIP file-scoped" ]
+}
+
+@test "bare bun test with kebab-case file is file-scoped" {
+    [ "$(classify 'bun test src/utils/date-helpers.test.ts')" = "SKIP file-scoped" ]
+}
+
+@test "workspace-filtered single-file test is file-scoped" {
+    [ "$(classify 'bun run --filter @mmops/api test -- src/routes/internal-cron.test.ts')" = "SKIP file-scoped" ]
+}
+
+@test "quoted test path is file-scoped" {
+    [ "$(classify "bun run --filter frontend test 'app/routes/_app.agents_.\$id_.edit.test.tsx'")" = "SKIP file-scoped" ]
+}
+
+# --- full suites must still queue ---
+
+@test "bare full suite queues" {
+    [ "$(classify 'bun run test')" = "QUEUE long-check" ]
+}
+
+@test "bare vitest run queues" {
+    [ "$(classify 'vitest run')" = "QUEUE long-check" ]
+}
+
+@test "pytest suite queues" {
+    [ "$(classify 'cd chat-services && uv run pytest -q')" = "QUEUE long-check" ]
+}
+
+@test "workspace-filtered full suite queues" {
+    [ "$(classify 'bun run --filter mobile test')" = "QUEUE long-check" ]
+}
+
+@test "config-file flag value does not count as file scope" {
+    [ "$(classify 'vitest run --config vitest.e2e.ts')" = "QUEUE long-check" ]
+}
+
+# --- existing skip rules keep working ---
+
+@test "watch mode is skipped" {
+    [ "$(classify 'bun run test --watch')" = "SKIP watch-or-server" ]
+}
+
+@test "already-queued ci-lock command is skipped" {
+    [ "$(classify '~/.local/bin/ci-lock bash -c "bun run test"')" = "SKIP already-queued" ]
+}
+
+@test "name-filtered test is skipped" {
+    [ "$(classify 'bun test -t "adds tax to total"')" = "SKIP name-filtered" ]
+}
+
+# --- read-only commands mentioning heavy words must not queue ---
+
+@test "sed printing a verify script is not queued" {
+    [ "$(classify "sed -n '1,240p' scripts/verify-quick.sh")" = "SKIP read-only-tool" ]
+}
+
+@test "rg searching for verify:quick is not queued" {
+    [ "$(classify "rg -n verify:quick package.json scripts")" = "SKIP read-only-tool" ]
+}
+
+@test "gh pr create with suite words in the title is not queued" {
+    [ "$(classify "gh pr create --title 'chore(mobile): cap playwright workers'")" = "SKIP read-only-tool" ]
+}
+
+@test "piped read-only chain is not queued" {
+    [ "$(classify 'git diff --stat | grep test')" = "SKIP read-only-tool" ]
+}
+
+@test "cat heredoc writing a test file is not queued" {
+    cmd="$(printf "cat > zz-probe.test.ts <<'EOF'\nuv run pytest -q\nEOF")"
+    [ "$(classify "$cmd")" = "SKIP read-only-tool" ]
+}
+
+@test "heredoc body does not classify the command that writes it" {
+    cmd="$(printf "python3 - <<'PY'\nprint('bun run test and pytest')\nPY")"
+    [ "$(classify "$cmd")" = "SKIP not-heavy" ]
+}
+
+@test "cd into a dir then running the suite still queues" {
+    [ "$(classify 'cd app && bun run test')" = "QUEUE long-check" ]
+}
+
+# --- typecheck and lint get their own lane, not the heavy one ---
+
+@test "bun run typecheck routes to the check lane" {
+    [ "$(classify 'bun run typecheck')" = "QUEUE check-only" ]
+}
+
+@test "tsc --noEmit routes to the check lane" {
+    [ "$(classify 'bunx tsc --noEmit')" = "QUEUE check-only" ]
+}
+
+@test "basedpyright routes to the check lane" {
+    [ "$(classify 'cd chat-services && uv run basedpyright chat_service')" = "QUEUE check-only" ]
+}
+
+@test "full-repo biome check routes to the check lane" {
+    [ "$(classify 'bunx biome check .')" = "QUEUE check-only" ]
+}
+
+@test "typecheck combined with a suite stays on the heavy lane" {
+    [ "$(classify 'bun run typecheck && bun run test')" = "QUEUE long-check" ]
+}
+
+@test "enforce mode puts a check-only command on the check lane" {
+    out="$(enforce 'bun run typecheck')"
+    [[ "$out" == *'CI_LOCK_LANE=check'* ]]
+}
+
+# --- enforce mode ---
+
+@test "enforce mode wraps a full suite in ci-lock" {
+    out="$(enforce 'bun run test')"
+    [[ "$out" == *'ci-lock bash -c'* ]]
+}
+
+@test "enforce mode leaves a file-scoped test untouched" {
+    out="$(enforce 'bun run test -- server/routers/migration-batch.test.ts')"
+    [ -z "$out" ]
+}
+
+@test "Claude Code rewrite carries no permission decision" {
+    out="$(enforce 'bun run test')"
+    [ "$(jq -c '.hookSpecificOutput | has("permissionDecision")' <<<"$out")" = false ]
+}
+
+@test "Codex rewrite pairs updatedInput with allow" {
+    out="$(enforce_codex 'bun run test')"
+    [ "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out")" = allow ]
+    [[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<<"$out")" == *"ci-lock bash -c 'bun run test'" ]]
+}
+
+@test "Codex gets no allow for a command the hook does not queue" {
+    out="$(enforce_codex 'bun run test -- server/routers/migration-batch.test.ts')"
+    [ -z "$out" ]
+}
+
+# --- review fixes: flags that do not consume the next argument ---
+
+@test "single-file pytest behind a quiet flag is file-scoped" {
+    [ "$(classify 'pytest -q tests/test_one.py')" = "SKIP file-scoped" ]
+}
+
+@test "single-file jest behind runInBand is file-scoped" {
+    [ "$(classify 'jest --runInBand tests/foo.test.js')" = "SKIP file-scoped" ]
+}
+
+# --- review fixes: nested execution is not read-only ---
+
+@test "command substitution running a suite queues" {
+    [ "$(classify 'echo "$(bun run test)"')" = "QUEUE long-check" ]
+}
+
+@test "find -exec running a suite queues" {
+    [ "$(classify 'find . -exec bun run test \;')" = "QUEUE long-check" ]
+}
+
+# --- review fixes: a file in one segment does not scope another ---
+
+@test "file in one segment does not excuse a suite in the next" {
+    [ "$(classify 'cat src/foo-bar.ts && bun run test')" = "QUEUE long-check" ]
+}
+
+# --- review fixes: separators inside quotes do not split segments ---
+
+@test "quoted semicolon in a PR title stays read-only" {
+    [ "$(classify "gh pr create --title 'fix playwright; cap workers'")" = "SKIP read-only-tool" ]
+}
+
+@test "quoted pipe in an rg pattern stays read-only" {
+    [ "$(classify "rg -n 'playwright|cypress' README.md")" = "SKIP read-only-tool" ]
+}
+
+# --- review fixes: here-strings and shell heredocs ---
+
+@test "here-string does not swallow the rest of the command" {
+    cmd="$(printf "cat <<< note\nbun run test")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "heredoc fed to bash is executed, so its body still counts" {
+    cmd="$(printf "bash <<'EOF'\nbun run test\nEOF")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+# --- review fixes: log records stay one line ---
+
+@test "multiline command logs a single sanitized record" {
+    : > "$LOG"
+    cmd="$(printf 'bun run test\nrm -rf docs')"
+    jq -cn --arg c "$cmd" '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK"
+    [ "$(wc -l < "$LOG" | tr -d ' ')" = "1" ]
+    [ "$(head -1 "$LOG" | awk -F'\t' '{print NF}')" = "4" ]
+}
+
+# --- second review round ---
+
+@test "punctuated heredoc delimiter still terminates stripping" {
+    cmd="$(printf "cat > x.json <<'END-JSON'\nuv run pytest\nEND-JSON\nbun run test")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "process substitution running a suite queues" {
+    [ "$(classify 'cat <(bun run test)')" = "QUEUE long-check" ]
+}
+
+@test "escaped quotes inside double quotes stay one segment" {
+    cmd="$(cat <<'EOF'
+printf '%s\n' "fix \"x; playwright\""
+EOF
+)"
+    [ "$(classify "$cmd")" = "SKIP read-only-tool" ]
+}
+
+@test "biome check with flags before the dot routes to the check lane" {
+    [ "$(classify 'bunx biome check --error-on-warnings .')" = "QUEUE check-only" ]
+}
+
+@test "typecheck plus an unrecognized command stays on the heavy lane" {
+    [ "$(classify 'bun run typecheck && bun run integration')" = "QUEUE long-check" ]
+}
+
+# --- third review round ---
+
+@test "pytest --ignore path does not count as file scope" {
+    [ "$(classify 'pytest --ignore tests/flaky-test.py')" = "QUEUE long-check" ]
+}
+
+@test "heredoc fed to bash -s still counts" {
+    cmd="$(printf "bash -s <<'EOF'\nbun run test\nEOF")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "heredoc fed to an absolute-path shell still counts" {
+    cmd="$(printf "/bin/bash <<'EOF'\nbun run test\nEOF")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "backslash-quoted heredoc delimiter still terminates stripping" {
+    cmd="$(printf 'cat <<\\EOF\npytest notes\nEOF\nbun run test')"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "substitution inside an unquoted heredoc body queues" {
+    cmd="$(printf '%s\n' 'cat >/dev/null <<EOF' '$(bun run test)' 'EOF')"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "awk system() call is not read-only" {
+    [ "$(classify 'awk '"'"'BEGIN{system("bun run test")}'"'"'')" = "QUEUE long-check" ]
+}
+
+@test "searching for system( stays read-only" {
+    [ "$(classify 'rg -n "system\(" src')" = "SKIP read-only-tool" ]
+}
+
+@test "bun run lint routes to the check lane" {
+    [ "$(classify 'bun run lint')" = "QUEUE check-only" ]
+}
+
+@test "full-repo ruff check routes to the check lane" {
+    [ "$(classify 'uv run ruff check .')" = "QUEUE check-only" ]
+}
+
+# --- fourth review round: redirections are not separators ---
+
+@test "typecheck with 2>&1 piped to tail routes to the check lane" {
+    [ "$(classify 'bun run typecheck 2>&1 | tail -5')" = "QUEUE check-only" ]
+}
+
+@test "tsc with both streams redirected routes to the check lane" {
+    [ "$(classify 'npx tsc --noEmit >/dev/null 2>&1')" = "QUEUE check-only" ]
+}
+
+@test "typecheck with a combined redirection routes to the check lane" {
+    [ "$(classify 'bun run typecheck &> out.log')" = "QUEUE check-only" ]
+}
+
+# --- fourth review round: browser downloads are not checks ---
+
+@test "playwright install is not queued" {
+    [ "$(classify 'bunx playwright install chromium')" = "SKIP not-a-check" ]
+}
+
+@test "playwright installs do not exempt unknown companion commands" {
+    [ "$(classify 'playwright install chromium && npm test')" = "QUEUE long-check" ]
+    [ "$(classify 'playwright install chromium && yarn test')" = "QUEUE long-check" ]
+    [ "$(classify 'playwright install chromium && custom-check')" = "QUEUE long-check" ]
+    [ "$(classify 'playwright install chromium && echo done')" = "SKIP not-a-check" ]
+}
+
+@test "interactive shells preserve terminal input redirects" {
+    [ "$(classify 'bash -i <&0')" = "SKIP watch-or-server" ]
+    [ "$(classify 'bash -i </dev/tty')" = "SKIP watch-or-server" ]
+    [ "$(classify 'bash -i 0<&0 >/tmp/session.log')" = "SKIP watch-or-server" ]
+    [ "$(classify 'bash -i <script.sh')" = "QUEUE long-check" ]
+}
+
+@test "playwright install-deps is not queued" {
+    [ "$(classify 'bunx playwright install-deps')" = "SKIP not-a-check" ]
+}
+
+@test "playwright test still queues" {
+    [ "$(classify 'bunx playwright test')" = "QUEUE long-check" ]
+}
+
+# --- fourth review round: polling loops must not hold the lock ---
+
+@test "until loop polling with sleep is skipped" {
+    [ "$(classify 'until ! kill -0 $(pgrep -f "tsc --noEmit" | head -1) 2>/dev/null; do sleep 5; done; echo done')" = "SKIP wait-loop" ]
+}
+
+# --- fourth review round: rails suites queue ---
+
+@test "bin/rails test queues" {
+    [ "$(classify 'bin/rails test')" = "QUEUE long-check" ]
+}
+
+@test "rails system tests queue" {
+    [ "$(classify 'bin/rails test:system')" = "QUEUE long-check" ]
+}
+
+@test "bundle exec rails test queues" {
+    [ "$(classify 'bundle exec rails test')" = "QUEUE long-check" ]
+}
+
+@test "rake test queues" {
+    [ "$(classify 'rake test')" = "QUEUE long-check" ]
+}
+
+@test "rails test:all queues" {
+    [ "$(classify 'rails test:all')" = "QUEUE long-check" ]
+}
+
+@test "single-file rails test is file-scoped" {
+    [ "$(classify 'bin/rails test test/models/donation_test.rb')" = "SKIP file-scoped" ]
+    [ "$(classify 'bin/rails test test/models/donation_test.rb:6')" = "SKIP file-scoped" ]
+}
+
+@test "shell variable data does not acquire the heavy lane" {
+    [ "$(classify "bash -c 'printf \"%s\\n\" \"\$HOME\"'")" = "SKIP not-heavy" ]
+    [ "$(classify "bash -c 'cat \"\$FILE\"'")" = "SKIP not-heavy" ]
+    [ "$(classify "bash -c '\"\$@\"' _ bun test")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'sed \"\$@\"' _ -e e")" = "QUEUE long-check" ]
+}
+
+@test "variable PID polling stays out of the heavy lane" {
+    [ "$(classify 'while kill -0 "$pid"; do sleep 1; done')" = "SKIP wait-loop" ]
+    [ "$(classify 'while kill -0 "$pid"; do sleep 1; done; bun test')" = "QUEUE long-check" ]
+    [ "$(classify 'while kill -0 "$(bun test)"; do sleep 1; done')" = "QUEUE long-check" ]
+}
+
+# --- fourth review round: theme check gets the check lane ---
+
+@test "shopify theme check routes to the check lane" {
+    [ "$(classify 'shopify theme check')" = "QUEUE check-only" ]
+}
+
+@test "theme check via a package script routes to the check lane" {
+    [ "$(classify 'bun run check:theme')" = "QUEUE check-only" ]
+}
+
+@test "pgrep for a suite name is read-only" {
+    [ "$(classify "pgrep -fc 'vitest|jest|playwright'")" = "SKIP read-only-tool" ]
+}
+
+@test "ps listing piped through grep for a runner is read-only" {
+    [ "$(classify 'ps -axo pid,command | grep playwright')" = "SKIP read-only-tool" ]
+}
+
+@test "suite inside a sleeping loop still queues" {
+    [ "$(classify 'while true; do bun test; sleep 1; done')" = "QUEUE long-check" ]
+}
+
+@test "suite after a wait loop still queues" {
+    [ "$(classify 'until ! kill -0 1234; do sleep 1; done && bun run test')" = "QUEUE long-check" ]
+}
+
+@test "quoted loop text does not excuse a suite" {
+    [ "$(classify "printf 'while x; do sleep 1; done' > note.txt && bun test")" = "QUEUE long-check" ]
+}
+
+@test "versioned playwright install is not a check" {
+    [ "$(classify 'bunx playwright@1.55.0 install chromium')" = "SKIP not-a-check" ]
+}
+
+@test "newline polling loops skip the queue" {
+    [ "$(classify $'until ! pgrep -f playwright\ndo\n sleep 5\ndone')" = "SKIP wait-loop" ]
+}
+
+@test "checks in sleeping loop conditions queue" {
+    [ "$(classify 'while bun test; do sleep 1; done')" = "QUEUE long-check" ]
+    [ "$(classify 'until bun run typecheck; do sleep 1; done')" = "QUEUE check-only" ]
+    [ "$(classify 'until bun run typecheck; do sleep 1; done; bun test')" = "QUEUE long-check" ]
+    [ "$(classify 'until bun run typecheck; do sleep 1; done; bun run integration')" = "QUEUE long-check" ]
+    [ "$(classify 'until bun run typecheck; do sleep 1; done; echo finished')" = "QUEUE check-only" ]
+}
+
+@test "quoted shell installs do not mask subsequent checks" {
+    [ "$(classify "bash -c 'playwright install chromium && playwright test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'playwright install chromium'")" = "SKIP not-a-check" ]
+    [ "$(classify "bash -c 'playwright install chromium && playwright test' _")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'bun \"\$1\"' _ test")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c '\$0 test' bun")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'playwright install chromium' _ && bun test")" = "QUEUE long-check" ]
+}
+
+@test "unknown nested shell commands keep a companion typecheck in the heavy lane" {
+    [ "$(classify "bash -c 'bun run integration' && bun run typecheck")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'echo hello' && bun run typecheck")" = "QUEUE check-only" ]
+}
+
+@test "busy logging lock does not block the hook decision" {
+    exec 8>"$LOG.lock"
+    flock -x 8
+    # Parent keeps the mutex until the hook returns, so an unbounded wait
+    # would deadlock. Bats' timeout bounds that failure.
+    jq -cn --arg c 'bun test' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=1 HOME="$FAKE_HOME" "$HOOK" 8>&- \
+        > "$BATS_TEST_TMPDIR/decision"
+    exec 8>&-
+    [ -s "$BATS_TEST_TMPDIR/decision" ]
+    [ ! -s "$LOG" ]
+}
+
+@test "concurrent hook writers retain each new record during rotation" {
+    awk 'BEGIN { for (i=0; i<60000; i++) printf "%0100d\n", i }' > "$LOG"
+    writers=()
+    for id in {1..12}; do
+        jq -cn --arg c "echo writer-$id" '{tool_input:{command:$c}}' |
+            CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK" &
+        writers+=($!)
+    done
+    for writer in "${writers[@]}"; do wait "$writer"; done
+    # Writers that found the mutex busy log from a detached process; give
+    # them time to land.
+    for _ in {1..100}; do
+        [ "$(grep -c 'echo writer-' "$LOG")" -lt 12 ] || break
+        sleep 0.1
+    done
+    [ "$(grep -c 'echo writer-' "$LOG")" -eq 12 ]
+    [ "$(wc -l < "$LOG")" -lt 60000 ]
+}
+
+@test "concatenated shell script fragments cannot hide checks" {
+    [ "$(classify "bash -c 'echo '\\''ok'\\''; bun test'")" = "QUEUE long-check" ]
+}
+
+@test "shell options before command strings cannot hide checks" {
+    [ "$(classify "bash --noprofile -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash --noprofile -c 'playwright install chromium'")" = "SKIP not-a-check" ]
+    [ "$(classify "bash -o pipefail -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+}
+
+@test "install substitutions cannot hide executable checks" {
+    [ "$(classify 'playwright install "$(bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'playwright install <(bun test)')" = "QUEUE long-check" ]
+    [ "$(classify 'playwright install "`bun test`"')" = "QUEUE long-check" ]
+}
+
+@test "shell suffix substitutions cannot hide checks" {
+    [ "$(classify "bash -c 'echo ok' </dev/null")" = 'SKIP not-heavy' ]
+    [ "$(classify "bash -c 'cat' < input.txt")" = 'SKIP not-heavy' ]
+    [ "$(classify 'bash -c '\''echo ok'\'' "$(bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'bash -c '\''echo ok'\'' > >(bun test)')" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'source /dev/stdin' <<< 'bun test'")" = "QUEUE long-check" ]
+}
+
+@test "symlinked logging mutex cannot truncate another file" {
+    printf '%s\n' 'keep this data' > "$BATS_TEST_TMPDIR/victim"
+    ln -s "$BATS_TEST_TMPDIR/victim" "$LOG.lock"
+    classify 'echo hello' >/dev/null
+    [ "$(cat "$BATS_TEST_TMPDIR/victim")" = 'keep this data' ]
+}
+
+@test "environment wrappers cannot use an inner install to hide checks" {
+    [ "$(classify "env FOO=bar bash -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "FOO=bar bash -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "command bash -c 'playwright install chromium && bun test'")" = "QUEUE long-check" ]
+}
+
+@test "implicit shell positional loops queue" {
+    [ "$(classify "bash -c 'for cmd; do \$cmd; done' _ 'bun test'")" = "QUEUE long-check" ]
+}
+
+@test "shell-wrapped process polling remains outside the queue" {
+    [ "$(classify "bash -c 'until ! kill -0 \$(pgrep -f playwright); do sleep 1; done'")" = "SKIP wait-loop" ]
+}
+
+@test "interactive shells never hold the heavy lane" {
+    [ "$(classify 'bash -O extglob -i')" = 'SKIP watch-or-server' ]
+    [ "$(classify 'bash -o vi -i')" = 'SKIP watch-or-server' ]
+    [ "$(classify "bash -o vi -ic 'bun test'")" = 'QUEUE long-check' ]
+    [ "$(classify 'bash -i >/tmp/session.log')" = 'SKIP watch-or-server' ]
+    [ "$(classify 'bash -i')" = "SKIP watch-or-server" ]
+    [ "$(classify 'zsh -il')" = "SKIP watch-or-server" ]
+    [ "$(classify "bash -ic 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash -i -c 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify 'bash -i & bun test')" = "QUEUE long-check" ]
+    [ "$(classify 'bash -i &')" = "SKIP watch-or-server" ]
+    [ "$(classify 'bash -i; bun test')" = "SKIP watch-or-server" ]
+    [ "$(classify 'bash -i && bun test')" = "SKIP watch-or-server" ]
+    [ "$(classify "bash -i <<< 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify 'bash -i checks.sh')" = "QUEUE long-check" ]
+}
+
+@test "dynamic tool arguments cannot add executable actions outside the queue" {
+    [ "$(classify "bash -c 'find \"\$@\"' _ . -exec sh -c 'bun test' \\;")" = "QUEUE long-check" ]
+}
+
+@test "rotation follows log symlinks without replacing them" {
+    target="$BATS_TEST_TMPDIR/target.log"
+    awk 'BEGIN { for (i=0; i<60000; i++) printf "%0100d\n", i }' > "$target"
+    chmod 660 "$target"
+    inode="$(stat -f%i "$target" 2>/dev/null || stat -c%i "$target")"
+    ln -s "$target" "$LOG"
+    jq -cn --arg c 'echo newest' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK"
+    [ -L "$LOG" ]
+    [ "$(wc -c < "$target")" -le 2621440 ]
+    [[ "$(tail -1 "$target")" == *'echo newest' ]]
+    [ "$(stat -f%Lp "$target" 2>/dev/null || stat -c%a "$target")" = 660 ]
+    [ "$(stat -f%i "$target" 2>/dev/null || stat -c%i "$target")" = "$inode" ]
+}
+
+@test "standard-stream logging emits the decision" {
+    jq -cn --arg c 'echo stream-record' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG=/dev/stderr CI_QUEUE_HOOK_ENFORCE=0 "$HOOK" 2>"$LOG"
+    [[ "$(cat "$LOG")" == *'echo stream-record' ]]
+    jq -cn --arg c 'echo stdout-record' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG=/dev/stdout CI_QUEUE_HOOK_ENFORCE=0 "$HOOK" >"$LOG"
+    [[ "$(cat "$LOG")" == *'echo stdout-record' ]]
+}
+
+@test "dynamic wait-loop conditions cannot hide supplied checks" {
+    [ "$(classify 'while kill -0 123; do sleep "$interval"; done')" = 'SKIP wait-loop' ]
+    [ "$(classify 'while true; do echo "$status"; sleep 1; done')" = "SKIP wait-loop" ]
+    [ "$(classify "bash -c 'until \"\$@\"; do sleep 1; done' _ bun test")" = "QUEUE long-check" ]
+    [ "$(classify "bash -c 'while true; do \"\$@\"; sleep 1; done' _ bun test")" = "QUEUE long-check" ]
+}
+
+@test "polling loops with test conditions and assignments skip the queue" {
+    [ "$(classify 'end=$((SECONDS+7200)); while [ $SECONDS -lt $end ]; do l=$(sysctl -n vm.loadavg | awk '"'"'{print int($2)}'"'"'); [ "$l" -lt 100 ] && break; sleep 60; done; git push')" = "SKIP wait-loop" ]
+    [ "$(classify 'clean=0; while [ $clean -lt 4 ]; do sleep 300; uv run fetch_comments.py --pr 5 > /tmp/pr.json; done')" = "SKIP wait-loop" ]
+}
+
+@test "polling loops that wait on a load reading skip the queue" {
+    [ "$(classify 'until [ "$(sysctl -n vm.loadavg | awk '"'"'{print int($2)}'"'"')" -lt 150 ]; do sleep 30; done; uptime; git push -u origin HEAD')" = "SKIP wait-loop" ]
+    [ "$(classify 'deadline=$((SECONDS+5400)); until [ "$(sysctl -n vm.loadavg | awk '"'"'{print int($2)}'"'"')" -lt 12 ] || [ $SECONDS -ge $deadline ]; do sleep 30; done; uptime')" = "SKIP wait-loop" ]
+    [ "$(classify 'until [ "$(bun test | awk '"'"'{print int($1)}'"'"')" -gt 0 ]; do sleep 30; done')" = "QUEUE long-check" ]
+    [ "$(classify 'until [ -f /tmp/ready ] && $CMD; do sleep 30; done')" = "QUEUE long-check" ]
+}
+
+@test "xcode and swift builds and tests queue" {
+    [ "$(classify "xcodebuild test -project Aqua.xcodeproj -scheme Aqua -destination 'platform=iOS Simulator,id=4E7C'")" = "QUEUE long-check" ]
+    [ "$(classify 'taskpolicy -B -p $$ xcodebuild test-without-building -project Aqua.xcodeproj -scheme QA')" = "QUEUE long-check" ]
+    [ "$(classify 'xcodebuild -project Aqua.xcodeproj -scheme Aqua build')" = "QUEUE long-check" ]
+    [ "$(classify 'swift test')" = "QUEUE long-check" ]
+    [ "$(classify 'swift test --filter EquipmentDecoderTests')" = "SKIP not-heavy" ]
+    [ "$(classify 'xcodebuild -version')" = "SKIP not-heavy" ]
+    [ "$(classify 'xcodebuild -list -project Aqua.xcodeproj')" = "SKIP not-heavy" ]
+    [ "$(classify 'xcrun swiftc -typecheck -swift-version 6 Sources/Foo.swift')" = "QUEUE check-only" ]
+}
+
+@test "polling loops still queue dynamic commands and trailing suites" {
+    [ "$(classify 'while true; do $CMD; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do eval "$x"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'until [ -f /tmp/done ]; do sleep 10; done; bun run test')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do result=$($CMD); sleep 1; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do LABEL="nightly run" "$CMD"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do timeout 600 "$CMD"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do if true; then "$CMD"; fi; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do /usr/bin/env "$CMD"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do echo "$(cd project && $CMD)"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do echo "$(cd "$(pwd)" && $CMD)"; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do result=`$CMD`; sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do cat <($CMD); sleep 5; done')" = "QUEUE long-check" ]
+    [ "$(classify 'while true; do find suites -type d -exec "$CMD" {} +; sleep 5; done')" = "QUEUE long-check" ]
+}
+
+@test "polling loops that capture read-only status skip the queue" {
+    [ "$(classify 'while true; do s=$(gh pr view 5 --json state); [ "$s" = done ] && break; sleep 30; done')" = "SKIP wait-loop" ]
+    [ "$(classify 'while true; do runs=$(gh run list --workflow pytest); sleep 30; done')" = "SKIP wait-loop" ]
+}
+
+@test "suites inside command substitutions queue" {
+    [ "$(classify 'x=$(pytest -q 2>&1 | tail -1); echo $x')" = "QUEUE long-check" ]
+    [ "$(classify 'r=$(rspec | tail -1)')" = "QUEUE long-check" ]
+    [ "$(classify 'x=$(pytest)')" = "QUEUE long-check" ]
+    [ "$(classify 'x=$(jest)')" = "QUEUE long-check" ]
+}
+
+@test "background interactive pipelines do not hide checks" {
+    [ "$(classify 'bash -i | cat & bun test')" = 'QUEUE long-check' ]
+}
+
+@test "symlinked standard-stream logging emits the decision" {
+    ln -s /dev/stderr "$BATS_TEST_TMPDIR/stream"
+    jq -cn --arg c 'echo linked-stream' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$BATS_TEST_TMPDIR/stream" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK" 2>"$LOG"
+    [[ "$(cat "$LOG")" == *'echo linked-stream' ]]
+}
+
+@test "quoted search loops are data but subsequent checks still queue" {
+    [ "$(classify "rg -n 'while bun test; do sleep 1; done' scripts")" = "SKIP read-only-tool" ]
+    [ "$(classify "rg -n 'while bun test; do sleep 1; done' scripts; bun test")" = "QUEUE long-check" ]
+}
+
+@test "rotation bounds bytes while retaining complete Unicode records" {
+    awk 'BEGIN { for (i=0; i<20000; i++) { for (j=0; j<200; j++) printf "界"; print "" } }' > "$LOG"
+    chmod 600 "$LOG"
+    jq -cn --arg c 'echo newest' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK"
+    [ "$(wc -c < "$LOG")" -le 2621440 ]
+    [ "$(head -1 "$LOG" | wc -c)" -eq 601 ]
+    [[ "$(tail -1 "$LOG")" == *'echo newest' ]]
+    [ "$(stat -f%Lp "$LOG" 2>/dev/null || stat -c%a "$LOG")" = 600 ]
+}
+
+# --- only running ci-lock or lefthook counts as already queued ---
+
+@test "mentioning lefthook does not excuse a suite" {
+    [ "$(classify 'cat lefthook.yml && bun run test')" = "QUEUE long-check" ]
+}
+
+@test "listing the ci-lock binary is read-only" {
+    [ "$(classify 'ls -la ~/.local/bin/ci-lock ~/.local/state/ci-lock/')" = "SKIP read-only-tool" ]
+}
+
+@test "self-wrapped private lane is already queued" {
+    [ "$(classify "CI_LOCK_FILE=/tmp/x-heavy.lock ~/.local/bin/ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+}
+
+@test "lefthook run is already queued" {
+    [ "$(classify 'lefthook run pre-push')" = "SKIP already-queued" ]
+}
+
+# --- read-only substitutions stay read-only ---
+
+@test "while-read loop formatting ps output is not queued" {
+    [ "$(classify 'ps -Ao ppid,stat | awk "{print \$1}" | while read n p; do echo "$n <- $(ps -o comm= -p $p)"; done')" != "QUEUE long-check" ]
+}
+
+@test "echo of a read-only substitution is read-only" {
+    [[ "$(classify 'echo "$(git rev-parse HEAD)"')" == SKIP* ]]
+}
+
+@test "echo of a suite substitution still queues" {
+    [ "$(classify 'echo "$(bun run test)"')" = "QUEUE long-check" ]
+}
+
+@test "shell syntax check and version queries are not queued" {
+    [ "$(classify 'bash -n scripts/pre-push-checks.sh')" = "SKIP not-heavy" ]
+    [[ "$(classify 'bash --version | head -1')" == SKIP* ]]
+}
+
+@test "running a script through bash still queues" {
+    [ "$(classify 'bash scripts/pre-push-checks.sh')" = "QUEUE long-check" ]
+}
+
+@test "ci-lock behind command, exec, or env -u is already queued" {
+    [ "$(classify "command ~/.local/bin/ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+    [ "$(classify "exec ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+    [ "$(classify "env -u CI_LOCK_HELD_HEAVY CI_LOCK_LANE=fast ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+}
+
+
+
+
+@test "ci-lock behind command or exec options is already queued" {
+    [ "$(classify "CI_LOCK_FILE=/tmp/p command -p ~/.local/bin/ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+    [ "$(classify "exec -a queued ci-lock bash -c 'bun run test'")" = "SKIP already-queued" ]
+}
+
+
+@test "a quoted paren inside a substitution cannot hide a suite" {
+    [ "$(classify "printf '%s\n' \"\$(echo \"done)\"; bun test)\"")" = "QUEUE long-check" ]
+}
+
+@test "inline-script syntax checks are judged as shell invocations" {
+    [ "$(classify "bash -n -c 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash -nc 'bun test'")" = "QUEUE long-check" ]
+}
+
+
+@test "env options that take a value do not hide ci-lock" {
+    [ "$(classify "CI_LOCK_FILE=/tmp/p env -P /usr/bin ~/.local/bin/ci-lock bash -c 'bun test'")" = "SKIP already-queued" ]
+}
+
+
+@test "ci-lock inside env -S is already queued" {
+    [ "$(classify "CI_LOCK_FILE=/tmp/p env -S 'ci-lock bash -c \"bun test\"'")" = "SKIP already-queued" ]
+    [ "$(classify "env --split-string='ci-lock bash -c \"bun test\"'")" = "SKIP already-queued" ]
+}
+
+@test "no-exec exemption does not cover +n, interactive, or substitutions" {
+    [ "$(classify "bash -n +n -c 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify "bash -nic 'bun test'")" = "QUEUE long-check" ]
+    [ "$(classify 'bash -n -c "$(bun test)"')" = "QUEUE long-check" ]
+}
+
+@test "an assignment inside env -S does not hide ci-lock" {
+    [ "$(classify "env -S 'CI_LOCK_FILE=/tmp/private ci-lock bash -c \"bun test\"'")" = "SKIP already-queued" ]
+}
+
+@test "quoted assignments with spaces do not hide ci-lock" {
+    [ "$(classify "LABEL='nightly run' CI_LOCK_FILE=/tmp/private ci-lock bash -c 'bun test'")" = "SKIP already-queued" ]
+}
+
+@test "a busy log mutex does not delay the hook, and the record still lands" {
+    : >"$LOG"
+    flock "$LOG.lock" sleep 2 &
+    locker=$!
+    sleep 0.3
+    start=$(perl -MTime::HiRes=time -e 'print time')
+    jq -cn --arg c 'echo busy-log' '{tool_input:{command:$c}}' |
+        CI_QUEUE_HOOK_LOG="$LOG" CI_QUEUE_HOOK_ENFORCE=0 "$HOOK"
+    elapsed=$(perl -MTime::HiRes=time -e 'printf "%.2f", time - $ARGV[0]' "$start")
+    perl -e 'exit($ARGV[0] < 1 ? 0 : 1)' "$elapsed"
+    wait "$locker"
+    for _ in {1..50}; do
+        ! grep -q 'echo busy-log' "$LOG" || break
+        sleep 0.1
+    done
+    grep -q 'echo busy-log' "$LOG"
+}
+
+@test "enforce mode wraps without predicting the directory" {
+    out="$(enforce 'cd ~/Sites/rezio-app && bun run test')"
+    [[ "$out" == *'ci-lock bash -c'* ]]
+    [[ "$out" != *CI_LOCK_REPO_DIR* ]]
+}
+
+@test "single quotes inside a double-quoted script do not hide an outer substitution" {
+    [ "$(classify "bash -n -c \"echo '\$(bun test)'\"")" = "QUEUE long-check" ]
+}
+
+@test "a +n after a value-taking option still disables the exemption" {
+    [ "$(classify "bash -n -o vi +n -c 'bun test'")" = "QUEUE long-check" ]
+}
+
+@test "an attached env -S payload does not hide ci-lock" {
+    [ "$(classify "env -S'CI_LOCK_FILE=/tmp/private ci-lock bash -c \"bun test\"'")" = "SKIP already-queued" ]
+}
+
+@test "GNU sed is not trusted as read-only" {
+    mkdir -p "$BATS_TEST_TMPDIR/gnu"
+    printf '#!/bin/sh\n[ "$1" = --version ] && echo "sed (GNU sed) 4.9"\n' >"$BATS_TEST_TMPDIR/gnu/sed"
+    chmod +x "$BATS_TEST_TMPDIR/gnu/sed"
+    [ "$(PATH="$BATS_TEST_TMPDIR/gnu:$PATH" classify 'echo "$(echo bun test | sed e)"')" = "QUEUE long-check" ]
+}
+
+@test "env -S split-string escapes separate arguments" {
+    [ "$(classify "env -S 'CI_LOCK_FILE=/tmp/private\\_ci-lock bash -c \"bun test\"'")" = "SKIP already-queued" ]
+}
+
+@test "find with expanded arguments is not read-only" {
+    [ "$(classify 'ACTION=-exec; echo "$(find . $ACTION bun test {} +)"')" = "QUEUE long-check" ]
+    [ "$(classify "awk '{print \$1}' notes.txt")" != "QUEUE long-check" ]
+}
+
+@test "awk command pipes and program files are not read-only" {
+    [ "$(classify "echo \"\$(awk 'BEGIN { \"bun test\" | getline }')\"")" = "QUEUE long-check" ]
+    [ "$(classify 'echo "$(awk -f check.awk)"')" = "QUEUE long-check" ]
+}
+
+@test "classifying a command never executes a binary it names" {
+    printf '#!/bin/sh\ntouch "%s/ran"\n' "$BATS_TEST_TMPDIR" >"$BATS_TEST_TMPDIR/sed"
+    chmod +x "$BATS_TEST_TMPDIR/sed"
+    cd "$BATS_TEST_TMPDIR"
+    classify 'echo "$(./sed -n p notes.txt)"' >/dev/null
+    [ ! -e "$BATS_TEST_TMPDIR/ran" ]
+}
+
+@test "git options that run a program are not read-only" {
+    [ "$(classify 'echo "$(git fetch --upload-pack=bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'echo "$(git ls-remote --upload-pack=bun test origin)"')" = "QUEUE long-check" ]
+    [ "$(classify 'git log --oneline -5')" = "SKIP read-only-tool" ]
+}
+
+@test "--rcfile swallowing -n does not earn the no-exec exemption" {
+    [ "$(classify "bash --rcfile -n -c 'bun test'")" = "QUEUE long-check" ]
+}
+
+@test "abbreviated git options that run a program are not read-only" {
+    [ "$(classify 'echo "$(git ls-remote --upload-p=bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'git log --reverse --oneline -5')" = "SKIP read-only-tool" ]
+    [ "$(classify 'git diff --exit-code')" = "SKIP read-only-tool" ]
+}
+
+@test "only inert commands are erased from substitutions" {
+    [ "$(classify 'echo "$(rg -e x --pre bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'echo "$(pwd)" "$(date)"')" = "SKIP read-only-tool" ]
+}
+
+@test "zsh named options do not earn a no-exec exemption" {
+    [ "$(classify "zsh -n -o INTERACTIVE -c 'bun test'")" = "QUEUE long-check" ]
+}
+
+@test "a trusted name at an arbitrary path is not trusted" {
+    [ "$(classify 'echo "$(/tmp/ps bun test)"')" = "QUEUE long-check" ]
+    [ "$(classify './grep bun test notes.txt')" = "QUEUE long-check" ]
+    [ "$(classify '/usr/bin/grep bun test notes.txt')" = "SKIP read-only-tool" ]
+}
+
+@test "a look-alike earlier in PATH does not make a substitution inert" {
+    mkdir -p "$BATS_TEST_TMPDIR/fake"
+    printf '#!/bin/sh\nexec "$@"\n' >"$BATS_TEST_TMPDIR/fake/ps"
+    chmod +x "$BATS_TEST_TMPDIR/fake/ps"
+    [ "$(PATH="$BATS_TEST_TMPDIR/fake:$PATH" classify 'echo "$(ps bun test)"')" = "QUEUE long-check" ]
+}
+
+@test "a backslash kept inside double quotes is part of the command word" {
+    [ "$(classify '"/tmp/ci\-lock" bun test')" = "QUEUE long-check" ]
+}
+
+@test "the no-exec exemption requires a trusted shell path" {
+    [ "$(classify '/tmp/bash -n check.sh')" = "QUEUE long-check" ]
+    [ "$(classify '/bin/bash -n check.sh')" = "SKIP not-heavy" ]
+}
+
+@test "an exported function shadowing a trusted tool is not trusted" {
+    ps() { "$@"; }
+    export -f ps
+    [ "$(classify 'echo "$(ps bun test)"')" = "QUEUE long-check" ]
+}
+
+# --- quoted data and plain file steps stay out of the heavy lane ---
+
+@test "quoted program text naming a suite is data" {
+    [ "$(classify "awk -F'\t' '\$2==\"heavy\"{if(c~/vitest|bun test/)n++}' ci-lock.log")" = "SKIP not-heavy" ]
+    [ "$(classify 'git commit -q -m "fix: bun test flake"')" = "SKIP not-heavy" ]
+    [ "$(classify "trello cards comment abc --text 'ran bun run test locally'")" = "SKIP not-heavy" ]
+}
+
+@test "quoted text that executes still queues" {
+    [ "$(classify "node -e \"require('child_process').execSync('bun test')\"")" = "QUEUE long-check" ]
+    [ "$(classify 'nice -n 10 bash -c "bun test"')" = "QUEUE long-check" ]
+    [ "$(classify 'eval "bun run test"')" = "QUEUE long-check" ]
+    [ "$(classify "xargs -I{} sh -c 'bun test {}'")" = "QUEUE long-check" ]
+    [ "$(classify 'printf "%s" "$(bun run test)"')" = "QUEUE long-check" ]
+    [ "$(classify 'env -S "bun run test"')" = "QUEUE long-check" ]
+    [ "$(classify 'time run_silent "tests" "bun run test"')" = "QUEUE long-check" ]
+    [ "$(classify 'cat <(eval "bun test")')" = "QUEUE long-check" ]
+    [ "$(classify 'tee >(eval "bun test")')" = "QUEUE long-check" ]
+    [ "$(classify 'if true; then eval "bun test"; fi')" = "QUEUE long-check" ]
+    [ "$(classify 'for f in a; do run_silent "tests" "bun run test"; done')" = "QUEUE long-check" ]
+    [ "$(classify "node -p 'require(\"child_process\").execSync(\"bun test\")'")" = "QUEUE long-check" ]
+    [ "$(classify "python3 <<< 'import os; os.system(\"bun test\")'")" = "QUEUE long-check" ]
+    [ "$(classify 'git rebase --exec "bun run test" main')" = "QUEUE long-check" ]
+    [ "$(classify 'git rebase -x "bun run test" main')" = "QUEUE long-check" ]
+    [ "$(classify 'git grep --open-files-in-pager="bun run test" TODO')" = "QUEUE long-check" ]
+    [ "$(classify "awk 'BEGIN { cmd=\"bun test\"; print \"\" | cmd; close(cmd) }'")" = "QUEUE long-check" ]
+}
+
+@test "a quoted command word or script name is not data" {
+    [ "$(classify '"./scripts/verify.sh"')" = "QUEUE long-check" ]
+    [ "$(classify 'bun run "test"')" = "QUEUE long-check" ]
+    [ "$(classify "bun run 'typecheck'")" = "QUEUE check-only" ]
+}
+
+@test "run_silent executes its quoted command" {
+    [ "$(classify 'source scripts/run_silent.sh && run_silent "tests" "bun run test"')" = "QUEUE long-check" ]
+    [ "$(classify 'source scripts/run_silent.sh && run_silent "typecheck" "bun run typecheck"')" = "QUEUE check-only" ]
+}
+
+@test "file edits and staging beside a typecheck keep the check lane" {
+    [ "$(classify 'rm apps/api/src/jobs/old.test.ts && bun run typecheck')" = "QUEUE check-only" ]
+    [ "$(classify 'cp a.ts b.ts && mkdir -p out && bunx tsc --noEmit -p .')" = "QUEUE check-only" ]
+    [ "$(classify 'git add a.ts && git commit -qm wip && bun run lint')" = "QUEUE check-only" ]
+}
+
+@test "only plain file steps are excused beside a typecheck" {
+    [ "$(classify 'source ./setup.sh && bun run typecheck')" = "QUEUE long-check" ]
+    [ "$(classify 'make seed && bun run typecheck')" = "QUEUE long-check" ]
+    [ "$(classify 'git push && bun run typecheck')" = "QUEUE long-check" ]
+    [ "$(classify 'git -c core.hooksPath=x commit -m wip && bun run typecheck')" = "QUEUE long-check" ]
+    [ "$(classify 'rm "$(make integration)" && bun run typecheck')" = "QUEUE long-check" ]
+    [ "$(classify 'cp <(make seed) out && bun run typecheck')" = "QUEUE long-check" ]
+    cmd="$(printf "python3 - <<'EOF'\nimport subprocess; subprocess.run(['bun', 'test'])\nEOF\nbun run typecheck")"
+    [ "$(classify "$cmd")" = "QUEUE long-check" ]
+}
+
+@test "an unterminated quote keeps its text visible" {
+    [ "$(classify "trello comment 'bun run test")" = "QUEUE long-check" ]
+}

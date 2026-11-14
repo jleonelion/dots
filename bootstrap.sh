@@ -62,16 +62,18 @@ info "Installing essential development tools..."
 brew install \
     bat \
     fd \
+    flock \
     ripgrep \
     zoxide \
     git \
     gh \
+    jq \
     tig
 
 # Install Bun
 if ! command -v bun &> /dev/null; then
     info "Installing Bun..."
-    curl -fsSL https://bun.sh/install | bash
+    curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
 else
     info "Bun already installed"
 fi
@@ -90,4 +92,5 @@ cd "$DOTFILES_DIR"
 ./install.sh --all
 
 info "Bootstrap complete!"
-warn "Please restart your terminal or run: source ~/.zshrc"
+# `source ~/.zshrc` would skip .zshenv, leaving LEFTHOOK_BIN unset in this shell.
+warn "Please restart your terminal or run: exec zsh"

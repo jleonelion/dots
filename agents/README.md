@@ -20,7 +20,6 @@ agents/
     ├── audit-ai-frontend/                # Audit AI-looking frontend implementations
     ├── baseline/                         # Install quality baseline (linter, hooks, dead-code)
     ├── claude-review/                    # Second opinion via Claude Code CLI
-    ├── clean-coder/                      # Invoked when user swears or is upset
     ├── clean-worktrees/                  # Audit/clean agent worktrees and gone branches safely
     ├── code-simplifier/                  # Simplify recently modified code
     ├── codex-review/                     # Second opinion via OpenAI Codex CLI
@@ -29,28 +28,24 @@ agents/
     ├── de-slop/                          # Clean AI-shaped code before PR
     ├── design-doc/                       # Create technical design documents
     ├── dogfood/                          # Exploratory test web app, structured bug report
-    ├── domain-model/                     # Grilling session that maintains CONTEXT.md + ADRs
     ├── emil-design-engineering/          # Design engineering principles
     ├── execute-plan/                     # Work through plan file task-by-task
-    ├── gh-address-pr-comments/           # Watch PR comments and fix valid feedback
+    ├── babysit-pr/                      # User-only wrapper for PR comments and CI fixes
+    ├── gh-address-pr-comments/           # Watch PR review, reply and resolve threads
     ├── gh-commit/                        # Conventional commit messages
     ├── gh-fix-ci/                        # Fix first failing CI check
     ├── gh-review-pr/                     # Review GitHub PR
-    ├── gh-ship/                          # Commit, push, PR in one step
-    ├── grilling/                         # Relentless one-question-at-a-time planning interview
     ├── grill-me/                         # Stress-test plan via relentless interview
     ├── handoff/                          # Generate continuation prompt
+    ├── html-communication/               # HTML write-ups of work, reported as a link
     ├── humanize-ai-text/                 # Humanize AI-shaped writing and citation cleanup
     ├── improve/                          # Senior codebase survey and improvement plan
     ├── improve-codebase-architecture/    # Find deepening opportunities
     ├── interface-details/                # Crafted UI micro-interactions and details
-    ├── iterate-forever/                  # Visual-reference-to-app loop
     ├── make-tests/                       # Add tests for current change
     ├── merge-conflicts/                  # Rebase, resolve conflicts, force-push
-    ├── loop-me/                          # Specify recurring workflows through grilling
     ├── nestjs-best-practices/            # NestJS architecture and API patterns
     ├── no-ui-flash/                      # Prevent wrong-state UI flashes
-    ├── pre-pr/                           # Project-appropriate PR validation and summary
     ├── prove-it-bug-fix/                 # Failing test before fix
     ├── qa/                               # Browser QA against plan file
     ├── quality-python/                   # Python structure, typing, IO, and tests
@@ -61,7 +56,7 @@ agents/
     ├── react-doctor/                     # Catch React issues early
     ├── react-native-skills/              # React Native and Expo performance patterns
     ├── react-router/                     # React Router patterns and modes
-    ├── security-audit/                   # Security review and secret scanning
+    ├── security-audit/                   # Multi-phase security audit (Cloudflare)
     ├── self-improve/                     # Codex session-driven self-improvement
     ├── shopify-app-store-review/         # Shopify App Store review requirements
     ├── shopify-baseline/                 # Shopify quality baseline
@@ -78,7 +73,7 @@ agents/
     ├── simple-html-artifact/             # Single-file HTML artifacts
     ├── skill-creator/                    # Create/edit/measure skills
     ├── smart-brevity/                    # Smart Brevity rewriting
-    ├── subagent-orchestrator/            # Orchestrate sub-agents for long tasks
+    ├── stageshow/                        # Product UI illustrations and animated demos
     ├── teach/                            # Teach skills or concepts with lessons
     ├── thermo-nuclear-code-quality-review/ # Harsh maintainability review
     ├── trello-cli/                       # Drive Trello through the `trello-cli`
@@ -128,24 +123,23 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 - `/handoff` — Continuation prompt for the next session
 - `/de-slop` — Remove AI artifacts and clean AI-shaped code before PR
 - `/make-tests` — Generate tests for current changes
-- `/iterate-forever` — Visual-reference-to-app loop with screenshot comparison
 - `/dogfood` — Systematic bug hunt with structured repro evidence
 - `/merge-conflicts` — Rebase onto main, resolve conflicts, force-push
 - `/simple-html-artifact` — Build or refine single-file HTML artifacts
+- `/html-communication` — HTML write-up of work, reported as a local path or a hosted link
 
 ### GitHub Workflow
 
-- `/gh-ship` — Commit, push, open PR in one step
 - `/gh-commit` — Imperative conventional commit message
 - `/gh-review-pr` — Thorough PR review (correctness, tests, risk)
-- `/gh-address-pr-comments` — Watch PR comments and fix valid review feedback
+- `/babysit-pr` — Run PR comment handling and CI fixes together, only when invoked
+- `/gh-address-pr-comments` — Watch PR review, fix feedback, reply and resolve eligible threads
 - `/gh-fix-ci` — Debug and fix first failing CI check
 - `/clean-worktrees` — Audit and clean agent worktrees and gone branches safely
 - `/trello-delivery` — Ship a Trello ticket end to end as a reviewable PR (non-Shopify web apps). Requires the `trello-cli` binary from [Scale-Flow/trello-cli](https://github.com/Scale-Flow/trello-cli)
 
 ### Code Quality and Review
 
-- `/pre-pr` — Project-appropriate validation, release-risk review, and PR summary
 - `/rams` — Accessibility and visual design review against WCAG
 - `/codex-review` — Second opinion via OpenAI Codex CLI
 - `/claude-review` — Second opinion via Claude Code CLI
@@ -161,7 +155,7 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 - `/react-router` — React Router patterns and mode-specific guidance
 - `/vercel-react-best-practices` — React/Next.js performance patterns
 - `/nestjs-best-practices` — NestJS architecture and API patterns
-- `/security-audit` — Security review for vulnerabilities and secret exposure
+- `/security-audit` — Multi-phase security audit with adversarial validation (vendored from cloudflare/security-audit-skill)
 - `/audit-ai-frontend` — Triage AI-looking UI: generic aesthetics, weak copy, a11y gaps
 - `/improve` — Senior codebase survey and improvement plan
 - `/improve-codebase-architecture` — Find deepening opportunities toward deep modules
@@ -171,11 +165,7 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 ### Planning and Thinking
 
 - `/grill-me` — Stress-test a plan via relentless interview until each branch resolves
-- `/grilling` — Relentless one-question-at-a-time planning interview
-- `/loop-me` — Specify recurring workflows through grilling
-- `/domain-model` — Grilling session that updates `CONTEXT.md` (glossary) and `docs/adr/` inline as decisions crystallize. Pairs with `/improve-codebase-architecture`
 - `/zoom-out` — Higher-level perspective on a section of code
-- `/subagent-orchestrator` — Coordinate sub-agents on complex long-horizon tasks
 - `/prove-it-bug-fix` — Failing reproduction test before fixing
 - `/ultragoal` — Design, critique, set, or update explicit long-horizon goals
 
@@ -183,6 +173,7 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 
 - `/emil-design-engineering` — Polished, accessible web interface principles
 - `/interface-details` — Crafted UI micro-interactions and details
+- `/stageshow` — Product UI illustrations and animated cursor demos. Vendored from [benjitaylor/skills](https://github.com/benjitaylor/skills/tree/main/stageshow)
 - `/no-ui-flash` — Prevent wrong-state flashes in SPA/SSR auth and state gates
 - `/web-animation-design` — Animation patterns and performance
 - `/shopify-liquid-patterns` — Liquid code patterns
@@ -222,7 +213,6 @@ Skills with `package.json` get their local dependencies installed with `bun inst
 
 - `/skill-creator` — Create, edit, evaluate, and benchmark skills
 - `/self-improve` — Codex session-driven self-improvement
-- `/clean-coder` — Invoked when user swears or is upset
 - `/teach` — Teach a skill or concept with workspace-local lessons
 - `/wizard` — Generate interactive bash wizards
 

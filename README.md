@@ -130,8 +130,9 @@ Replace the placeholder values:
 ### Shell Reload
 
 ```bash
-# Reload zsh
-source ~/.zshrc
+# Reload zsh. Use exec rather than `source ~/.zshrc`, which skips .zshenv
+# and so leaves exports like LEFTHOOK_BIN unset in the current shell.
+exec zsh
 
 # Or open a new terminal
 ```
@@ -170,7 +171,7 @@ dots/
 ├── bootstrap.sh            # Fresh macOS setup script
 ├── install.sh              # Installation script
 ├── Brewfile                # Homebrew package list
-├── CLAUDE.md               # Repo-specific agent instructions
+├── AGENTS.md               # Repo-specific agent instructions
 ├── README.md               # This file
 ├── tests/                  # bats + shellcheck suite (run_tests.sh)
 ├── shell/                  # Shell configurations
@@ -194,7 +195,7 @@ dots/
     ├── AGENTS.md           # Global instructions
     ├── pi-packages.txt     # pi extension package sources
     ├── subagents/          # Subagent definitions (14 agents)
-    └── skills/             # Skills (78 skills)
+    └── skills/             # Skills (88 skills)
 ```
 
 ## AI Assistant Configuration
@@ -215,13 +216,11 @@ Some shared skills include a `package.json` for local validation helpers. Any ag
 - `/handoff` - Continuation prompt for the next session
 - `/de-slop` - Remove AI artifacts and clean AI-shaped code before PRs
 - `/make-tests` - Generate tests for current changes
-- `/iterate-forever` - Visual-reference-to-app loop with screenshot comparison
 - `/dogfood` - Exploratory test web app, structured bug report
 - `/merge-conflicts` - Rebase onto main, resolve conflicts, force-push
 - `/simple-html-artifact` - Build or refine single-file HTML artifacts
 
 **GitHub Workflow:**
-- `/gh-ship` - Commit, push, PR in one step
 - `/gh-commit` - Conventional commit messages
 - `/gh-review-pr` - Thorough PR review
 - `/gh-address-pr-comments` - Watch PR comments and fix valid review feedback
@@ -230,7 +229,6 @@ Some shared skills include a `package.json` for local validation helpers. Any ag
 - `/trello-delivery` - Ship a Trello ticket end to end as a reviewable PR (non-Shopify web apps). Requires the `trello-cli` binary from [Scale-Flow/trello-cli](https://github.com/Scale-Flow/trello-cli)
 
 **Code Quality and Review:**
-- `/pre-pr` - Project-appropriate validation, release-risk review, and PR summary
 - `/rams` - Accessibility and visual design review
 - `/codex-review` - Second opinion via OpenAI Codex CLI
 - `/claude-review` - Second opinion via Claude Code CLI
@@ -245,7 +243,7 @@ Some shared skills include a `package.json` for local validation helpers. Any ag
 - `/react-router` - React Router patterns and mode-specific guidance
 - `/vercel-react-best-practices` - React/Next.js performance patterns
 - `/nestjs-best-practices` - NestJS architecture and API patterns
-- `/security-audit` - Security review for vulnerabilities and secret exposure
+- `/security-audit` - Multi-phase security audit with isolated hunters, adversarial validation, and schema-checked findings. Vendored from [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill)
 - `/audit-ai-frontend` - Triage AI-looking UI (generic aesthetics, weak copy, a11y gaps)
 - `/improve` - Senior codebase survey and improvement plan
 - `/improve-codebase-architecture` - Find deepening opportunities toward deep modules
@@ -254,17 +252,14 @@ Some shared skills include a `package.json` for local validation helpers. Any ag
 
 **Planning and Thinking:**
 - `/grill-me` - Stress-test plan via relentless interview
-- `/grilling` - Relentless one-question-at-a-time planning interview
-- `/loop-me` - Specify recurring workflows through grilling
-- `/domain-model` - Grilling session that maintains CONTEXT.md (glossary) and docs/adr/ inline
 - `/zoom-out` - Higher-level perspective on a section of code
-- `/subagent-orchestrator` - Coordinate sub-agents on long-horizon tasks
 - `/prove-it-bug-fix` - Failing reproduction test before fix
 - `/ultragoal` - Design, critique, set, or update explicit long-horizon goals
 
 **Frontend and Design:**
 - `/emil-design-engineering` - Polished, accessible web interface principles
 - `/interface-details` - Crafted UI micro-interactions and details
+- `/stageshow` - Product UI illustrations and animated cursor demos. Vendored from [benjitaylor/skills](https://github.com/benjitaylor/skills/tree/main/stageshow)
 - `/no-ui-flash` - Prevent wrong-state flashes in SPA/SSR auth and state gates
 - `/web-animation-design` - Animation patterns and performance
 - `/shopify-liquid-patterns` - Liquid code patterns
@@ -294,12 +289,12 @@ Some shared skills include a `package.json` for local validation helpers. Any ag
 
 **External Tools:**
 - `/asana-cli` - Manage Asana tasks and projects through the `asana` CLI
+- `/reverse-engineer-anything` - Reverse engineer binaries, Electron/JS apps, .NET, firmware, and websites via the REA MCP. Vendored from [morluto/rea](https://github.com/morluto/rea); needs `npx rea-agents setup` for the MCP server
 - `/trello-cli` - Drive Trello (boards, lists, cards, comments, checklists, labels) through the `trello-cli`. Requires the binary from [Scale-Flow/trello-cli](https://github.com/Scale-Flow/trello-cli)
 
 **Meta:**
 - `/skill-creator` - Create, edit, evaluate, benchmark skills
 - `/self-improve` - Codex session-driven self-improvement
-- `/clean-coder` - Invoked when user swears or is upset
 - `/teach` - Teach a skill or concept with workspace-local lessons
 - `/wizard` - Generate interactive bash wizards
 

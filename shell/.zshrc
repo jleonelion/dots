@@ -54,6 +54,10 @@ command -v fd  >/dev/null && alias find='fd'
 
 # Docker CLI completions
 fpath=($HOME/.docker/completions $fpath)
+
+# Sentry CLI completions
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
+
 autoload -Uz compinit
 compinit
 
@@ -79,3 +83,15 @@ case ":$PATH:" in
   *) export PATH="$PNPM_HOME/bin:$PATH" ;;
 esac
 # pnpm end
+
+# dcg: warn if hook was silently removed from Claude Code settings
+if command -v dcg &>/dev/null && command -v jq &>/dev/null; then
+  if [ -f "$HOME/.claude/settings.json" ] &&
+    ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("dcg$"))' \
+      "$HOME/.claude/settings.json" &>/dev/null; then
+    printf '\033[1;33m[dcg] Hook missing from ~/.claude/settings.json — run: dcg install\033[0m\n'
+  fi
+fi
+
+# bun completions
+[ -s "/Users/carterdeangelis/.bun/_bun" ] && source "/Users/carterdeangelis/.bun/_bun"
